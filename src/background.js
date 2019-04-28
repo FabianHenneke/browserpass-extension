@@ -5,6 +5,7 @@ require("chrome-extension-async");
 const sha1 = require("sha1");
 const idb = require("idb");
 const helpers = require("./helpers");
+const errors = require("./errors");
 
 // native application id
 var appID = "com.github.browserpass.native";
@@ -97,16 +98,15 @@ async function updateMatchingPasswordsCount(tabId) {
     try {
         const settings = await getFullSettings();
         var response = await hostAction(settings, "list");
-        if (response.status != "ok") {
-            throw new Error(JSON.stringify(response));
-        }
 
         // Get tab info
         try {
             const tab = await chrome.tabs.get(tabId);
             settings.host = new URL(tab.url).hostname;
         } catch (e) {
-            throw new Error(`Unable to determine domain of the tab with id ${tabId}`);
+            throw new errors.ExtensionError(
+                `Unable to determine domain of the tab with id ${tabId}`
+            );
         }
 
         const logins = helpers.prepareLogins(response.data.files, settings);
@@ -123,7 +123,8 @@ async function updateMatchingPasswordsCount(tabId) {
             });
         }
     } catch (e) {
-        console.log(e);
+        // Ignore possible HostErrors thrown by the "list" request
+        errors.logToConsole(e);
     }
 }
 
@@ -317,7 +318,7 @@ async function fillFields(settings, login, fields) {
     try {
         await injectScript(settings, false);
     } catch {
-        throw new Error("Unable to inject script in the top frame");
+        throw new errors.ExtensionError("Unable to inject script in the top frame");
     }
 
     let injectedAllFrames = false;
@@ -412,7 +413,9 @@ async function fillFields(settings, login, fields) {
     }
 
     if (!filledFields.length) {
-        throw new Error(`No fillable forms available for fields: ${fields.join(", ")}`);
+        throw new errors.ExtensionError(
+            `No fillable forms available for fields: ${fields.join(", ")}`
+        );
     }
 
     // build focus or submit request
@@ -459,14 +462,11 @@ async function getFullSettings() {
     var configureSettings = Object.assign(deepCopy(settings), {
         defaultStore: {}
     });
-    var response = await hostAction(configureSettings, "configure");
-    if (response.status != "ok") {
-        settings.hostError = response;
-    }
-    settings.version = response.version;
-
-    // Fill store settings, only makes sense if 'configure' succeeded
-    if (response.status === "ok") {
+    var response;
+    try {
+        response = await hostAction(configureSettings, "configure");
+        // Since hostAction throws on a non-ok response, we can now assume an ok response
+        settings.version = response.version;
         if (Object.keys(settings.stores).length > 0) {
             // there are user-configured stores present
             for (var storeId in settings.stores) {
@@ -501,8 +501,14 @@ async function getFullSettings() {
                 }
             }
         }
+    } catch (e) {
+        if (e instanceof errors.HostError) {
+            settings.version = e.version;
+            settings.hostError = e;
+        }
+        errors.logToConsole(e);
     }
-
+    // Everything below does not require an ok response to the "configure" request
     // Fill recent data
     for (var storeId in settings.stores) {
         var when = localStorage.getItem("recent:" + storeId);
@@ -673,14 +679,11 @@ async function handleMessage(settings, message, sendResponse) {
         case "listFiles":
             try {
                 var response = await hostAction(settings, "list");
-                if (response.status != "ok") {
-                    throw new Error(JSON.stringify(response)); // TODO handle host error
-                }
                 sendResponse({ status: "ok", files: response.data.files });
             } catch (e) {
                 sendResponse({
                     status: "error",
-                    message: "Unable to enumerate password files" + e.toString()
+                    message: "Unable to enumerate password files: " + e.toString()
                 });
             }
             break;
@@ -714,7 +717,7 @@ async function handleMessage(settings, message, sendResponse) {
             try {
                 var url = message.login.fields.url || message.login.domain;
                 if (!url) {
-                    throw new Error("No URL is defined for this entry");
+                    throw new errors.ExtensionError("No URL is defined for this entry");
                 }
                 if (!url.match(/:\/\//)) {
                     url = "http://" + url;
@@ -803,9 +806,10 @@ async function handleMessage(settings, message, sendResponse) {
  * @param object settings Live settings object
  * @param string action   Action to run
  * @param params object   Additional params to pass to the host app
- * @return Promise
+ * @return Promise resolving to an ok response
+ * @throws errors.HostError if the host app sends an error response
  */
-function hostAction(settings, action, params = {}) {
+async function hostAction(settings, action, params = {}) {
     var request = {
         settings: settings,
         action: action
@@ -814,7 +818,16 @@ function hostAction(settings, action, params = {}) {
         request[key] = params[key];
     }
 
-    return chrome.runtime.sendNativeMessage(appID, request);
+    const response = await chrome.runtime.sendNativeMessage(appID, request);
+    if (response.status === "ok") {
+        return response;
+    } else {
+        const hostError = new errors.HostError(response);
+        // We do the logging in a central place, but leave the user-facing display of the error to
+        // the caller
+        errors.logToConsole(hostError);
+        throw hostError;
+    }
 }
 
 /**
@@ -831,9 +844,6 @@ async function parseFields(settings, login) {
         storeId: login.store.id,
         file: login.login + ".gpg"
     });
-    if (response.status != "ok") {
-        throw new Error(JSON.stringify(response)); // TODO handle host error
-    }
 
     // save raw data inside login
     login.raw = response.data.contents;
@@ -943,8 +953,7 @@ async function receiveMessage(message, sender, sendResponse) {
         const settings = await getFullSettings();
         handleMessage(settings, message, sendResponse);
     } catch (e) {
-        // handle error
-        console.log(e);
+        errors.logToConsole(e);
         sendResponse({ status: "error", message: e.toString() });
     }
 }
@@ -985,10 +994,7 @@ async function saveSettings(settings) {
     delete settingsToSave.stores.default;
 
     // verify that the native host is happy with the provided settings
-    var response = await hostAction(settingsToSave, "configure");
-    if (response.status != "ok") {
-        throw new Error(`${response.params.message}: ${response.params.error}`);
-    }
+    await hostAction(settingsToSave, "configure");
 
     // before save, make sure to remove store settings that we receive from the host app
     if (typeof settingsToSave.stores === "object") {

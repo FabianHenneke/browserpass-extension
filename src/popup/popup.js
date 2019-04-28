@@ -2,6 +2,7 @@
 "use strict";
 
 require("chrome-extension-async");
+const errors = require("../errors");
 const Interface = require("./interface");
 const helpers = require("../helpers");
 
@@ -10,22 +11,28 @@ run();
 //----------------------------------- Function definitions ----------------------------------//
 
 /**
- * Handle an error
+ * Show a status message to the user
  *
- * @since 3.0.0
+ * @since 3.1.1
  *
- * @param Error error Error object
- * @param string type Error type
+ * @param {string|Error} status A textual status message or an Error instance
  */
-function handleError(error, type = "error") {
-    if (type == "error") {
-        console.log(error);
+function showStatus(status) {
+    const node = document.createElement("div");
+    if (status instanceof Error) {
+        node.setAttribute("class", "part error");
+        if (status instanceof errors.HostError) {
+            // HostErrors provide a dedicated HTML description
+            status.appendAsHtmlTo(node);
+        } else {
+            node.textContent = status.toString();
+        }
+    } else {
+        node.setAttribute("class", "part notice");
+        node.textContent(status);
     }
-    var errorNode = document.createElement("div");
-    errorNode.setAttribute("class", "part " + type);
-    errorNode.textContent = error.toString();
     document.body.innerHTML = "";
-    document.body.appendChild(errorNode);
+    document.body.appendChild(node);
 }
 
 /**
@@ -39,16 +46,16 @@ async function run() {
     try {
         var response = await chrome.runtime.sendMessage({ action: "getSettings" });
         if (response.status != "ok") {
-            throw new Error(response.message);
+            throw new errors.ExtensionError(response.message);
         }
         var settings = response.settings;
 
         if (settings.hasOwnProperty("hostError")) {
-            throw new Error(settings.hostError.params.message);
+            throw settings.HostError;
         }
 
         if (typeof settings.host === "undefined") {
-            throw new Error("Unable to retrieve current tab information");
+            throw new errors.ExtensionError("Unable to retrieve current tab information");
         }
 
         // get list of logins

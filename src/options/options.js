@@ -2,6 +2,7 @@
 "use strict";
 
 require("chrome-extension-async");
+const errors = require("../errors");
 const Interface = require("./interface");
 
 run();
@@ -17,12 +18,18 @@ run();
  * @param string type Error type
  */
 function handleError(error, type = "error") {
-    if (type == "error") {
+    if (error instanceof errors.HostError) {
+        error.logToConsole();
+    } else if (type == "error") {
         console.log(error);
     }
     var errorNode = document.createElement("div");
     errorNode.setAttribute("class", "part " + type);
-    errorNode.textContent = error.toString();
+    if (error instanceof errors.HostError) {
+        error.appendAsHtmlTo(errorNode);
+    } else {
+        errorNode.textContent = error.toString();
+    }
     document.body.innerHTML = "";
     document.body.appendChild(errorNode);
 }
