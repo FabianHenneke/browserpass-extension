@@ -7,8 +7,10 @@ const idb = require("idb");
 const BrowserpassURL = require("@browserpass/url");
 const helpers = require("./helpers");
 
-// native application id
-var appID = "com.github.browserpass.native";
+// browserpass-chromeos application id used as a backend on Chrome OS
+var chromeOSAppID = "fdlccgiobmfdfelpnaiaodldncpmcdlb";
+// native application id for use with sendNativeMessage on non-Chrome OS platforms
+var nativeAppID = "com.github.browserpass.native";
 
 // OTP extension id
 var otpID = [
@@ -864,6 +866,18 @@ async function handleMessage(settings, message, sendResponse) {
 }
 
 /**
+ * Check whether we are running on Chrome OS
+ *
+ * @since 3.5.0
+ * @return Promise<bool>
+ */
+async function isCrosDevice() {
+    var info = await chrome.runtime.getPlatformInfo();
+    return true;
+    // return info.os == "cros";
+}
+
+/**
  * Send a request to the host app
  *
  * @since 3.0.0
@@ -873,7 +887,20 @@ async function handleMessage(settings, message, sendResponse) {
  * @param params object   Additional params to pass to the host app
  * @return Promise
  */
-function hostAction(settings, action, params = {}) {
+async function hostAction(settings, action, params = {}) {
+    // The Chrome OS backend needs to know the bounds of the current browser window to show dialogs
+    // in the right spot.
+    var isCros = await isCrosDevice();
+    if (isCros) {
+        var currentWindow = await chrome.windows.getLastFocused();
+        settings["windowBounds"] = {
+            left: currentWindow.left,
+            height: currentWindow.height,
+            top: currentWindow.top,
+            width: currentWindow.width
+        };
+    }
+
     var request = {
         settings: settings,
         action: action
@@ -882,7 +909,11 @@ function hostAction(settings, action, params = {}) {
         request[key] = params[key];
     }
 
-    return chrome.runtime.sendNativeMessage(appID, request);
+    if (isCros) {
+        return chrome.runtime.sendMessage(chromeOSAppID, request);
+    } else {
+        return chrome.runtime.sendNativeMessage(nativeAppID, request);
+    }
 }
 
 /**
@@ -1112,7 +1143,7 @@ function triggerOTPExtension(settings, action, otp) {
  * @param object Event details
  * @return void
  */
-function onExtensionInstalled(details) {
+async function onExtensionInstalled(details) {
     // No permissions
     if (!chrome.notifications) {
         return;
@@ -1127,15 +1158,20 @@ function onExtensionInstalled(details) {
         });
     };
 
+    var isCros = await isCrosDevice();
     if (details.reason === "install") {
         if (localStorage.getItem("installed") === null) {
             localStorage.setItem("installed", Date.now());
-            show(
-                "installed",
-                "browserpass: Install native host app",
-                "Remember to install the complementary native host app to use this extension.\n" +
-                    "Instructions here: https://github.com/browserpass/browserpass-native"
-            );
+
+            var title = isCros
+                ? "browserpass: Install Chrome OS backend app"
+                : "browserpass: Install native host app";
+            var message = isCros
+                ? "Remember to install the Chrome OS backend app to use this extension.\n" +
+                  "Instructions here: https://github.com/browserpass/browserpass-chromeos"
+                : "Remember to install the complementary native host app to use this extension.\n" +
+                  "Instructions here: https://github.com/browserpass/browserpass-native";
+            show("installed", title, message);
         }
     } else if (details.reason === "update") {
         var changelog = {
